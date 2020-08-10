@@ -2,7 +2,6 @@ import os, time, csv, sys, subprocess
 import copy
 import h5py
 import numpy as np
-import munch
 import scipy.constants as constants
 from scipy.spatial.distance import cdist
 from scipy.spatial import ConvexHull
@@ -13,12 +12,12 @@ try:
 except:
     print('sdds failed to load')
     pass
-sys.path.append(os.path.abspath(__file__+'/../../'))
-import SimulationFramework.Modules.read_gdf_file as rgf
-import SimulationFramework.Modules.minimumVolumeEllipse as mve
+sys.path.append(os.path.dirname(__file__))
+import read_gdf_file as rgf
+import minimumVolumeEllipse as mve
 MVE = mve.EllipsoidTool()
 
-class beam(munch.Munch):
+class beam(object):
 
     particle_mass = constants.m_e
     E0 = particle_mass * constants.speed_of_light**2
@@ -141,7 +140,6 @@ class beam(munch.Munch):
 
     def interpret_astra_data(self, data, normaliseZ=False):
         x, y, z, cpx, cpy, cpz, clock, charge, index, status = np.transpose(data)
-        zref = z[0]
         self.beam['code'] = "ASTRA"
         self.beam['reference_particle'] = data[0]
         # if normaliseZ:
@@ -163,7 +161,7 @@ class beam(munch.Munch):
         self.beam['index'] = index
         self.beam['status'] = status
         # print self.Bz
-        self.beam['t'] = [clock if status == -1 else ((z-zref) / (-1 * Bz * constants.speed_of_light)) for status, z, Bz, clock in zip(self.beam['status'], z, self.Bz, self.beam['clock'])]
+        self.beam['t'] = [clock if status == -1 else (z / (-1 * Bz * constants.speed_of_light)) for status, z, Bz, clock in zip(self.beam['status'], znorm, self.Bz, self.beam['clock'])]
         # self.beam['t'] = self.z / (1 * self.Bz * constants.speed_of_light)#[time if status is -1 else 0 for time, status in zip(clock, status)]#
         self.beam['total_charge'] = np.sum(self.beam['charge'])
 
@@ -205,7 +203,7 @@ class beam(munch.Munch):
         self.beam['px'] = cpx * self.particle_mass
         self.beam['py'] = cpy * self.particle_mass
         self.beam['pz'] = cpz * self.particle_mass
-        self.beam['t'] = [(z / (-1 * Bz * constants.speed_of_light)) for z, Bz in zip(self.z, self.Bz)]
+        self.beam['t'] = [(z / (1 * Bz * constants.speed_of_light)) for z, Bz in zip(self.z, self.Bz)]
         # self.beam['t'] = self.z / (1 * self.Bz * constants.speed_of_light)#[time if status is -1 else 0 for time, status in zip(clock, status)]#
         self.beam['total_charge'] = charge
         self.beam['charge'] = []
@@ -223,7 +221,7 @@ class beam(munch.Munch):
         self.beam['px'] = cpx * self.q_over_c
         self.beam['py'] = cpy * self.q_over_c
         self.beam['pz'] = cpz * self.q_over_c
-        self.beam['t'] = [(z / (-1 * Bz * constants.speed_of_light)) for z, Bz in zip(self.z, self.Bz)]
+        self.beam['t'] = [(z / (1 * Bz * constants.speed_of_light)) for z, Bz in zip(self.z, self.Bz)]
         # self.beam['t'] = self.z / (1 * self.Bz * constants.speed_of_light)#[time if status is -1 else 0 for time, status in zip(clock, status)]#
         self.beam['total_charge'] = charge
         self.beam['charge'] = []
@@ -493,7 +491,7 @@ class beam(munch.Munch):
             inputgrp['total_charge'] = self.beam['total_charge']
             inputgrp['npart'] = len(self.x)
             inputgrp['centered'] = centered
-            inputgrp['code'] = self.beam['code']
+            inputgrp['code'] = self.beam['code'] # This could be changed here to specify teh type maybe?
             inputgrp['particle_mass'] = mass
             beamgrp = f.create_group("beam")
             if 'reference_particle' in self.beam:
@@ -551,9 +549,11 @@ class beam(munch.Munch):
             startposition = np.array(h5file.get('/Parameters/Starting_Position'))
             startposition = startposition if startposition is not None else [0,0,0]
             self.beam['starting_position'] = startposition
-            theta =  np.array(h5file.get('/Parameters/Rotation'))
+            theta = np.array(h5file.get('/Parameters/Rotation'))
             theta = theta if theta is not None else 0
             self.beam['rotation'] = theta
+            code = np.array(h5file.get('/Parameters/code')) # Added for completeness as its in the write method
+            self.beam['code'] = code.item().decode("utf-8") # wee bit hacky to get it to behave nicely
             if local == True:
                 self.rotate_beamXZ(self.beam['rotation'], preOffset=self.beam['starting_position'])
 
@@ -598,10 +598,7 @@ class beam(munch.Munch):
         return np.mean(u2*up2) - np.mean(u2)*np.mean(up2)
 
     def emittance(self, x, xp, p=None):
-        cov_x = self.covariance(x, x)
-        cov_xp = self.covariance(xp, xp)
-        cov_x_xp = self.covariance(x, xp)
-        emittance = np.sqrt(cov_x * cov_xp - cov_x_xp**2) if (cov_x * cov_xp - cov_x_xp**2) > 0 else 0
+        emittance = np.sqrt(self.covariance(x, x)*self.covariance(xp, xp) - self.covariance(x, xp)**2)
         if p is None:
             return emittance
         else:
@@ -787,7 +784,7 @@ class beam(munch.Munch):
         if not hasattr(self,'slice'):
             self.slice = {}
         if not hasattr(self,'_slicelength'):
-            self.slice_length = 0
+            self.slice_length = 0.1e-12
             # print("Assuming slice length is 100 fs")
         twidth = (max(self.t) - min(self.t))
         if twidth == 0:
@@ -839,19 +836,19 @@ class beam(munch.Munch):
     def slice_momentum(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
-        self.slice['Momentum'] = np.array([cpbin.mean() if len(cpbin) > 0 else 0 for cpbin in self._cpbins ])
+        self.slice['Momentum'] = np.array([cpbin.mean() for cpbin in self._cpbins])
         return self.slice['Momentum']
     @property
     def slice_momentum_spread(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
-        self.slice['Momentum_Spread'] = np.array([cpbin.std() if len(cpbin) > 0 else 0 for cpbin in self._cpbins])
+        self.slice['Momentum_Spread'] = np.array([cpbin.std() for cpbin in self._cpbins])
         return self.slice['Momentum_Spread']
     @property
     def slice_relative_momentum_spread(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
-        self.slice['Relative_Momentum_Spread'] = np.array([100*cpbin.std()/cpbin.mean() if len(cpbin) > 0 else 0 for cpbin in self._cpbins])
+        self.slice['Relative_Momentum_Spread'] = np.array([100*cpbin.std()/cpbin.mean() for cpbin in self._cpbins])
         return self.slice['Relative_Momentum_Spread']
 
     def slice_data(self, data):
@@ -888,42 +885,42 @@ class beam(munch.Munch):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.x, self.xp)
-        self.slice['Horizontal_Emittance'] = np.array([self.emittance(xbin, xpbin) if len(cpbin) > 0 else 0 for xbin, xpbin, cpbin in emitbins])
+        self.slice['Horizontal_Emittance'] = np.array([self.emittance(xbin, xpbin) for xbin, xpbin, cpbin in emitbins])
         return self.slice['Horizontal_Emittance']
     @property
     def slice_vertical_emittance(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.y, self.yp)
-        self.slice['Vertical_Emittance'] = np.array([self.emittance(ybin, ypbin) if len(cpbin) > 0 else 0 for ybin, ypbin, cpbin in emitbins])
+        self.slice['Vertical_Emittance'] = np.array([self.emittance(ybin, ypbin) for ybin, ypbin, cpbin in emitbins])
         return self.slice['Vertical_Emittance']
     @property
     def slice_normalized_horizontal_emittance(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.x, self.xp)
-        self.slice['Normalized_Horizontal_Emittance'] = np.array([self.emittance(xbin, xpbin, cpbin) if len(cpbin) > 0 else 0 for xbin, xpbin, cpbin in emitbins])
+        self.slice['Normalized_Horizontal_Emittance'] = np.array([self.emittance(xbin, xpbin, cpbin) for xbin, xpbin, cpbin in emitbins])
         return self.slice['Normalized_Horizontal_Emittance']
     @property
     def slice_normalized_vertical_emittance(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.y, self.yp)
-        self.slice['Normalized_Vertical_Emittance'] = np.array([self.emittance(ybin, ypbin, cpbin) if len(cpbin) > 0 else 0 for ybin, ypbin, cpbin in emitbins])
+        self.slice['Normalized_Vertical_Emittance'] = np.array([self.emittance(ybin, ypbin, cpbin) for ybin, ypbin, cpbin in emitbins])
         return self.slice['Normalized_Vertical_Emittance']
     @property
     def slice_normalized_mve_horizontal_emittance(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.x, self.xp)
-        self.slice['Normalized_mve_Horizontal_Emittance'] = np.array([self.mve_emittance(xbin, xpbin, cpbin) if len(cpbin) > 0 else 0 for xbin, xpbin, cpbin in emitbins])
+        self.slice['Normalized_mve_Horizontal_Emittance'] = np.array([self.mve_emittance(xbin, xpbin, cpbin) for xbin, xpbin, cpbin in emitbins])
         return self.slice['Normalized_mve_Horizontal_Emittance']
     @property
     def slice_normalized_mve_vertical_emittance(self):
         if not hasattr(self,'_tbins') or not hasattr(self,'_cpbins'):
             self.bin_time()
         emitbins = self.emitbins(self.y, self.yp)
-        self.slice['Normalized_mve_Vertical_Emittance'] = np.array([self.mve_emittance(ybin, ypbin, cpbin) if len(cpbin) > 0 else 0 for ybin, ypbin, cpbin in emitbins])
+        self.slice['Normalized_mve_Vertical_Emittance'] = np.array([self.mve_emittance(ybin, ypbin, cpbin) for ybin, ypbin, cpbin in emitbins])
         return self.slice['Normalized_mve_Vertical_Emittance']
     @property
     def slice_peak_current(self):
@@ -944,7 +941,7 @@ class beam(munch.Munch):
         xbins = self.slice_data(self.beam['x'])
         exbins =  self.slice_horizontal_emittance
         emitbins = list(zip(xbins, exbins))
-        self.slice['slice_beta_x'] = np.array([self.covariance(x, x)/ex if ex > 0 else 0 for x, ex in emitbins])
+        self.slice['slice_beta_x'] = np.array([self.covariance(x, x)/ex for x, ex in emitbins])
         return self.slice['slice_beta_x']
     @property
     def slice_alpha_x(self):
@@ -952,7 +949,7 @@ class beam(munch.Munch):
         xpbins = self.slice_data(self.xp)
         exbins =  self.slice_horizontal_emittance
         emitbins = list(zip(xbins, xpbins, exbins))
-        self.slice['slice_alpha_x'] = np.array([-1*self.covariance(x, xp)/ex if ex > 0 else 0 for x, xp, ex in emitbins])
+        self.slice['slice_alpha_x'] = np.array([-1*self.covariance(x, xp)/ex for x, xp, ex in emitbins])
         return self.slice['slice_alpha_x']
     @property
     def slice_gamma_x(self):
@@ -963,7 +960,7 @@ class beam(munch.Munch):
         ybins = self.slice_data(self.beam['y'])
         eybins =  self.slice_vertical_emittance
         emitbins = list(zip(ybins, eybins))
-        self.slice['slice_beta_y'] = np.array([self.covariance(y, y)/ey if ey > 0 else 0 for y, ey in emitbins])
+        self.slice['slice_beta_y'] = np.array([self.covariance(y, y)/ey for y, ey in emitbins])
         return self.slice['slice_beta_y']
     @property
     def slice_alpha_y(self):
@@ -971,7 +968,7 @@ class beam(munch.Munch):
         ypbins = self.slice_data(self.yp)
         eybins =  self.slice_vertical_emittance
         emitbins = list(zip(ybins, ypbins, eybins))
-        self.slice['slice_alpha_y'] = np.array([-1*self.covariance(y,yp)/ey if ey > 0 else 0 for y, yp, ey in emitbins])
+        self.slice['slice_alpha_y'] = np.array([-1*self.covariance(y,yp)/ey for y, yp, ey in emitbins])
         return self.twiss['slice_alpha_y']
     @property
     def slice_gamma_y(self):
@@ -1124,14 +1121,6 @@ class beam(munch.Munch):
         C22 /= len(x)
         return C11, C12, C22
 
-    @property
-    def eta_x(self):
-        return self.calculate_etax()[0]
-
-    @property
-    def eta_xp(self):
-        return self.calculate_etax()[1]
-
     def calculate_etax(self):
         p = self.cp
         pAve = np.mean(p)
@@ -1273,3 +1262,41 @@ class beam(munch.Munch):
     @property
     def Sy(self):
         return np.sqrt(self.covariance(self.y,self.y))
+
+    @property
+    def Sz(self):
+        return np.sqrt(self.covariance(self.z,self.z))
+
+    # These are also useful for some calculations
+    @property
+    def Mx(self):
+        return np.mean(self.beam['x'])
+
+    @property
+    def My(self):
+        return np.mean(self.beam['y'])
+    @property
+    def Mz(self):
+        return np.mean(self.beam['z'])
+
+    @property
+    def Mzn(self):
+        return 0.0
+
+
+    # Added to use with dwa_beam_tools
+    @property
+    def nMacros(self):
+        return len(self.x)
+
+    # Could cause a problem with a variable weight macro file...
+    @property
+    def charge_per_macro(self):
+        return self.charge / self.nMacros
+
+    @property
+    def code(self):
+        if 'code' in self.beam:
+            return self.beam['code']
+        else:
+            return 'unknown'
