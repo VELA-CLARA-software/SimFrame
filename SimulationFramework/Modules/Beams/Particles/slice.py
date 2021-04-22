@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from ...units import UnitValue
 
@@ -7,9 +8,18 @@ class slice():
         self.beam = beam
         self._slicelength = 0
         self._slices = 0
-        self.bin_time()
+        self.time_binned = {'beam': None, 'slices': None, 'slice_length': None}
+        # self.bin_time()
     # def __repr__(self):
     #     return repr({p: self.emittance(p) for p in ('x', 'y')})
+
+    def have_we_already_been_binned(self):
+        if self.time_binned['beam'] == self.beam and self.time_binned['slices'] == self._slices and self.time_binned['slice_length'] == self._slicelength:
+            return True
+        return False
+
+    def update_binned_parameters(self):
+        self.time_binned = {'beam': self.beam, 'slices': self._slices, 'slice_length': self._slicelength}
 
     @property
     def slice_length(self):
@@ -29,11 +39,11 @@ class slice():
         self.set_slices(slices)
 
     def set_slices(self, slices):
-        twidth = (max(self.beam.t) - min(self.beam.t))
+        twidth = np.ptp(self.beam.t, axis=0)
         # print('twidth = ', twidth)
         if twidth == 0:
             t = self.beam.z / (-1 * self.beam.Bz * constants.speed_of_light)
-            twidth = (max(t) - min(t))
+            twidth = np.ptp(t, axis=0)
         if slices == 0:
             slices = int(twidth / 0.1e-12)
         self._slices = slices
@@ -41,27 +51,29 @@ class slice():
         self.bin_time()
 
     def bin_time(self):
-        if hasattr(self.beam, 't') and len(self.beam.t) > 0:
-            if not self.slice_length > 0:
-                # print('no slicelength', self.slice_length)
-                self._slice_length = 0
-                # print("Assuming slice length is 100 fs")
-            twidth = (max(self.beam.t) - min(self.beam.t))
-            if twidth == 0:
-                t = self.beam.z / (-1 * self.beam.Bz * constants.speed_of_light)
-                twidth = (max(t) - min(t))
-            else:
-                t = self.beam.t
-            if not self.slice_length > 0.0:
-                self.slice_length = twidth / 20.0
-            # print('slicelength =', self.slice_length)
-            nbins = max([1,int(np.ceil(twidth / self.slice_length))])+2
-            self._hist, binst =  np.histogram(t, bins=nbins, range=(min(t)-self.slice_length, max(t)+self.slice_length))
-            self._t_Bins = binst
-            self._t_binned = np.digitize(t, self._t_Bins)
-            self._tfbins = [[self._t_binned == i] for i in range(1, len(binst))]
-            self._tbins = UnitValue([np.array(self.beam.t)[tuple(tbin)] for tbin in self._tfbins], units='s', dtype=np.ndarray)
-            self._cpbins = UnitValue([np.array(self.beam.cp)[tuple(tbin)] for tbin in self._tfbins], units='eV/c', dtype=np.ndarray)
+        if not self.have_we_already_been_binned():
+            if hasattr(self.beam, 't') and len(self.beam.t) > 0:
+                if not self.slice_length > 0:
+                    # print('no slicelength', self.slice_length)
+                    self._slice_length = 0
+                    # print("Assuming slice length is 100 fs")
+                twidth = np.ptp(self.beam.t, axis=0)
+                if twidth == 0:
+                    t = self.beam.z / (-1 * self.beam.Bz * constants.speed_of_light)
+                    twidth = np.ptp(t, axis=0)
+                else:
+                    t = self.beam.t
+                if not self.slice_length > 0.0:
+                    self.slice_length = twidth / 20.0
+                # print('slicelength =', self.slice_length)
+                nbins = max([1,int(np.ceil(twidth / self.slice_length))])+2
+                self._hist, binst =  np.histogram(t, bins=nbins, range=(np.min(t)-self.slice_length, np.max(t)+self.slice_length))
+                self._t_Bins = binst
+                self._t_binned = np.digitize(t, self._t_Bins)
+                self._tfbins = [[self._t_binned == i] for i in range(1, len(binst))]
+                self._tbins = UnitValue([np.array(self.beam.t)[tuple(tbin)] for tbin in self._tfbins], units='s', dtype=np.ndarray)
+                self._cpbins = UnitValue([np.array(self.beam.cp)[tuple(tbin)] for tbin in self._tfbins], units='eV/c', dtype=np.ndarray)
+                self.update_binned_parameters()
 
     def bin_momentum(self, width=10**6):
         pwidth = (max(self.beam.cp) - min(self.beam.cp))
@@ -188,7 +200,8 @@ class slice():
     def slice_current(self):
         if not hasattr(self,'_hist'):
             self.bin_time()
-        f = lambda bin: np.abs(self.beam.Q) / len(self.beam.t) * (len(bin) / (max(bin) - min(bin))) if len(bin) > 1 else 0
+        absQ = np.abs(self.beam.Q) / len(self.beam.t)
+        f = lambda bin: absQ * (len(bin) / np.ptp(bin, axis=0)) if len(bin) > 1 else 0
         # f = lambda bin: len(bin) if len(bin) > 1 else 0
         return UnitValue([f(bin) for bin in self._tbins], units='A')
     @property
